@@ -70,6 +70,24 @@ interface ObfGrid {
   order?: Array<Array<string | number | null>>;
 }
 
+interface ObfImage {
+  id: string;
+  data?: string;
+  path?: string;
+  url?: string;
+  width?: number;
+  height?: number;
+  content_type?: string;
+  license?: {
+    type?: string;
+    copyright_notice_url?: string;
+    source_url?: string;
+    author_name?: string;
+    author_url?: string;
+    author_email?: string;
+  };
+}
+
 interface ObfBoard {
   format?: string;
   id: string;
@@ -79,7 +97,7 @@ interface ObfBoard {
   description_html?: string;
   buttons: ObfButton[];
   grid?: ObfGrid;
-  images?: any[];
+  images?: ObfImage[];
   sounds?: any[];
 }
 
@@ -132,7 +150,7 @@ class ObfProcessor extends BaseProcessor {
   /**
    * Extract an image from the ZIP file and convert to data URL
    */
-  private async extractImageAsDataUrl(imageId: string, images: any[]): Promise<string | null> {
+  private async extractImageAsDataUrl(imageId: string, images: ObfImage[]): Promise<string | null> {
     // Check cache first
     if (this.imageCache.has(imageId)) {
       return this.imageCache.get(imageId) ?? null;
@@ -147,8 +165,8 @@ class ObfProcessor extends BaseProcessor {
     }
 
     // If image has data property, use that
-    if ((imageData as { data?: string }).data) {
-      const dataUrl = (imageData as { data: string }).data;
+    if (imageData.data) {
+      const dataUrl = imageData.data;
       this.imageCache.set(imageId, dataUrl);
       return dataUrl;
     }
@@ -158,7 +176,7 @@ class ObfProcessor extends BaseProcessor {
       // Images are typically stored in an 'images' folder or root
       const possiblePaths = [
         imageData.path, // Explicit path if provided
-        `images/${imageData.filename || imageId}`, // Standard images folder
+        `images/${imageData.path || imageId}`, // Standard images folder
         imageData.id, // Just the ID
       ].filter(Boolean);
 
@@ -181,8 +199,8 @@ class ObfProcessor extends BaseProcessor {
     }
 
     // If image has a URL, use that as fallback
-    if ((imageData as { url?: string }).url) {
-      const url = (imageData as { url: string }).url;
+    if (imageData.url) {
+      const url = imageData.url;
       this.imageCache.set(imageId, url);
       return url;
     }
@@ -223,6 +241,8 @@ class ObfProcessor extends BaseProcessor {
         ? String(boardData.id)
         : _boardPath?.split(/[/\\]/).pop() || '';
 
+    const images = boardData.images;
+
     const buttons: AACButton[] = await Promise.all(
       sourceButtons.map(async (btn: ObfButton): Promise<AACButton> => {
         const semanticAction: AACSemanticAction = btn.load_board
@@ -248,11 +268,17 @@ class ObfProcessor extends BaseProcessor {
         // Resolve image if image_id is present
         let resolvedImage: string | undefined;
         let imageBuffer: Buffer | undefined;
-        if (btn.image_id && boardData.images) {
-          resolvedImage =
-            (await this.extractImageAsDataUrl(btn.image_id, boardData.images)) || undefined;
-          imageBuffer =
-            (await this.extractImageAsBuffer(btn.image_id, boardData.images)) || undefined;
+        if (btn.image_id && images) {
+          resolvedImage = (await this.extractImageAsDataUrl(btn.image_id, images)) || undefined;
+          imageBuffer = (await this.extractImageAsBuffer(btn.image_id, images)) || undefined;
+
+          // save image data
+          if (images) {
+            const imageIndex = images?.findIndex((img: any) => img.id === btn.image_id);
+            if (imageIndex !== -1) {
+              images[imageIndex].data = resolvedImage;
+            }
+          }
         }
 
         // Build parameters object for Grid3 export compatibility
@@ -294,7 +320,7 @@ class ObfProcessor extends BaseProcessor {
       parentId: null,
       locale: boardData.locale,
       descriptionHtml: boardData.description_html,
-      images: boardData.images,
+      images,
       sounds: boardData.sounds,
     });
 
@@ -646,13 +672,21 @@ class ObfProcessor extends BaseProcessor {
   private createObfBoardFromPage(
     page: AACPage,
     fallbackName: string,
-    metadata?: AACTreeMetadata
+    metadata?: AACTreeMetadata,
+    embedData = false
   ): ObfBoard {
     const { rows, columns, order, buttonPositions } = this.buildGridMetadata(page);
     const boardName =
       metadata?.name && page.id === metadata?.defaultHomePageId
         ? metadata.name
         : page.name || fallbackName;
+    let images: ObfImage[] = Array.isArray(page.images) ? page.images : [];
+    if (!embedData) {
+      images = images.map((image) => {
+        delete image.data;
+        return image;
+      });
+    }
 
     return {
       format: OBF_FORMAT_VERSION,
@@ -694,7 +728,7 @@ class ObfProcessor extends BaseProcessor {
           hidden: button.visibility === 'Hidden' || false,
         };
       }),
-      images: Array.isArray(page.images) ? page.images : [],
+      images,
       sounds: Array.isArray(page.sounds) ? page.sounds : [],
     };
   }
@@ -740,7 +774,7 @@ class ObfProcessor extends BaseProcessor {
     return await readBinaryFromInput(outputPath);
   }
 
-  async saveFromTree(tree: AACTree, outputPath: string): Promise<void> {
+  async saveFromTree(tree: AACTree, outputPath: string, embedData = false): Promise<void> {
     const { writeTextToPath, writeBinaryToPath, pathExists, mkDir, join } =
       this.options.fileAdapter;
     if (outputPath.endsWith('.obf')) {
@@ -750,12 +784,17 @@ class ObfProcessor extends BaseProcessor {
         throw new Error('No pages to save');
       }
 
-      const obfBoard = this.createObfBoardFromPage(rootPage, 'Exported Board', tree.metadata);
+      const obfBoard = this.createObfBoardFromPage(
+        rootPage,
+        'Exported Board',
+        tree.metadata,
+        embedData
+      );
       await writeTextToPath(outputPath, JSON.stringify(obfBoard, null, 2));
     } else {
       const getPageFilename = (id: string): string => (id.endsWith('.obf') ? id : `${id}.obf`);
       const files = Object.values(tree.pages).map((page) => {
-        const obfBoard = this.createObfBoardFromPage(page, 'Board', tree.metadata);
+        const obfBoard = this.createObfBoardFromPage(page, 'Board', tree.metadata, embedData);
         const obfContent = JSON.stringify(obfBoard, null, 2);
         const name = getPageFilename(page.id);
         return {
